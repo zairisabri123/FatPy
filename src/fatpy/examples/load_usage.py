@@ -1,120 +1,138 @@
 """Usage of the load definition module: the 7 reference load cases.
 
-Prints, for each case, the time axis and a few samples of every channel, so
-the behavior of `fatpy.data_parsing.loads` can be read from the console.
-Run it with:
+Builds the cases from independent channels, prints the out-of-phase case as a
+table, shows the Voigt stress and strain exports and saves one figure per case
+in ``output/load_cases/`` next to this file. Run it with:
 
     python -m fatpy.examples.load_usage
 """
 
 import io
 import sys
+from pathlib import Path
 
-import numpy as np
+import matplotlib
 
-from fatpy.data_parsing.loads import Channel, LoadCase, LoadHistory, Quantity
-from fatpy.struct_mech.stress import calc_von_mises_stress
-from fatpy.utils.signal import ConstantAmplitudeSignal, VariableAmplitudeSignal
+matplotlib.use("Agg")  # files only, no window
+
+import matplotlib.pyplot as plt  # noqa: E402
+import numpy as np  # noqa: E402
+
+from fatpy.data_parsing.loads import (  # noqa: E402
+    TIME_UNIT,
+    Channel,
+    LoadCase,
+    LoadHistory,
+    Quantity,
+)
+from fatpy.utils.signal import (  # noqa: E402
+    ConstantAmplitudeSignal,
+    VariableAmplitudeSignal,
+)
 
 if isinstance(sys.stdout, io.TextIOWrapper) and sys.stdout.encoding.lower() != "utf-8":
     sys.stdout.reconfigure(encoding="utf-8")
 
-
-def sep(title: str) -> None:
-    """Print a banner around a section title."""
-    print(f"\n{'=' * 70}\n{title}\n{'=' * 70}")
+OUTPUT = Path(__file__).parent / "output" / "load_cases"
 
 
-def show(history: LoadHistory, every: int = 8) -> None:
-    """Print the time axis summary and every `every`-th sample as a table."""
-    kind = "load sequence" if history.is_sequence else "one common period"
-    dt = history.time[1] - history.time[0] if len(history) > 1 else 0.0
-    print(
-        f"{history.load_case_name}: {len(history)} samples ({kind}), "
-        f"dt = {dt:g} s, t_end = {history.time[-1]:g} s"
-    )
-    table = history.to_table()
-    print("".join(f"{key:>16}" for key in table))
-    for i in range(0, len(history), every):
-        print("".join(f"{column[i]:16.3f}" for column in table.values()))
+def sine(
+    amplitude: float, frequency: float = 1.0, mean: float = 0.0, phase: float = 0.0
+) -> ConstantAmplitudeSignal:
+    """Sine signal with the given amplitude, frequency [Hz], mean and phase [deg]."""
+    return ConstantAmplitudeSignal(amplitude, mean, frequency=frequency, phase=phase)
 
 
-def stress(name: str, component: str, signal: ConstantAmplitudeSignal) -> Channel:
-    """Stress channel (MPa) carrying a constant-amplitude signal."""
-    return Channel(name, Quantity.STRESS, component, signal)
-
-
-# ---------------------------------------------------------------------------
-sep("1. Tension: s11, sine, 200 MPa, 1 Hz")
-tension = stress(
-    "tension", "s11", ConstantAmplitudeSignal(amplitude=200.0, frequency=1.0)
-)
-show(LoadCase("tension", [tension]).history())
-
-# ---------------------------------------------------------------------------
-sep("2. Torsion: s12, sine, 115 MPa, 1 Hz")
-torsion = stress(
-    "torsion", "s12", ConstantAmplitudeSignal(amplitude=115.0, frequency=1.0)
-)
-show(LoadCase("torsion", [torsion]).history())
-
-# ---------------------------------------------------------------------------
-sep("3. In-phase tension + torsion")
-in_phase = LoadCase("in-phase", [tension, torsion]).history()
-show(in_phase)
-ratio = in_phase.get("torsion").values[1:] / in_phase.get("tension").values[1:]
-print(f"s12 / s11 is constant: {np.allclose(ratio, 115 / 200)} (= {115 / 200:g})")
-
-# ---------------------------------------------------------------------------
-sep("4. Out-of-phase: s12 shifted by 90 deg")
-torsion_90 = stress(
-    "torsion",
-    "s12",
-    ConstantAmplitudeSignal(amplitude=115.0, frequency=1.0, phase=90.0),
-)
-out_of_phase = LoadCase("out-of-phase", [tension, torsion_90]).history()
-show(out_of_phase)
-s11 = out_of_phase.get("tension").values
-s12 = out_of_phase.get("torsion").values
-ellipse = (s11 / 200.0) ** 2 + (s12 / 115.0) ** 2
-print(
-    f"(s11/200)^2 + (s12/115)^2: min = {ellipse.min():.12f}, max = {ellipse.max():.12f}"
-)
-
-voigt_stress = out_of_phase.to_voigt_stress()
-print(f"\nto_voigt_stress(): shape {voigt_stress.shape}, columns 11,22,33,23,13,12")
-print("first row :", voigt_stress[0])
-print("max |col| :", np.abs(voigt_stress).max(axis=0))
-von_mises = calc_von_mises_stress(voigt_stress)
-print(f"von Mises over the cycle: {von_mises.min():.1f} .. {von_mises.max():.1f} MPa")
-
-# ---------------------------------------------------------------------------
-sep("5. Mean stress: mean 100 MPa, amplitude 200 MPa")
-with_mean = stress(
-    "tension",
-    "s11",
-    ConstantAmplitudeSignal(amplitude=200.0, mean=100.0, frequency=1.0),
-)
-history = LoadCase("mean stress", [with_mean]).history()
-show(history)
-values = history.get("tension").values
-print(f"max = {values.max():g} MPa, min = {values.min():g} MPa")
-
-# ---------------------------------------------------------------------------
-sep("6. Different frequencies: s11 at 1 Hz, s12 at 2 Hz")
-torsion_2hz = stress(
-    "torsion", "s12", ConstantAmplitudeSignal(amplitude=115.0, frequency=2.0)
-)
-history = LoadCase("frequencies", [tension, torsion_2hz]).history()
-show(history, every=16)
-print(f"common cycle = {history.time[-1]:g} s, {len(history)} samples")
-
-# ---------------------------------------------------------------------------
-sep("7. Force sequence: Fx = 0, 5000, -2000, 8000, 0 N, dt = 0.1 s")
+# Independent channels: every case below is built from these pieces.
+s11 = Channel("s11", Quantity.STRESS, "s11", sine(200.0))
+s12 = Channel("s12", Quantity.STRESS, "s12", sine(115.0))
+s12_90 = Channel("s12", Quantity.STRESS, "s12", sine(115.0, phase=90.0))
+s11_mean = Channel("s11", Quantity.STRESS, "s11", sine(200.0, mean=100.0))
+s12_2hz = Channel("s12", Quantity.STRESS, "s12", sine(115.0, frequency=2.0))
 fx_values = np.array([0.0, 5000.0, -2000.0, 8000.0, 0.0])
-force = Channel(
-    "force", Quantity.FORCE, "Fx", VariableAmplitudeSignal(fx_values, time_step=0.1)
+fx = Channel(
+    "Fx", Quantity.FORCE, "Fx", VariableAmplitudeSignal(fx_values, time_step=0.1)
 )
-history = LoadCase("force sequence", [force]).history()
-show(history, every=1)
-print("output equals input:", np.array_equal(history.get("force").values, fx_values))
+
+CASES = [
+    LoadCase("1 tension", [s11]),
+    LoadCase("2 torsion", [s12]),
+    LoadCase("3 in-phase", [s11, s12]),
+    LoadCase("4 out-of-phase", [s11, s12_90]),
+    LoadCase("5 mean stress", [s11_mean]),
+    LoadCase("6 different frequencies", [s11, s12_2hz]),
+    LoadCase("7 force history", [fx]),
+]
+PATH_PLOT = {"3 in-phase", "4 out-of-phase", "6 different frequencies"}
+
+
+def print_table(history: LoadHistory) -> None:
+    """Print every sample of a history, one column per channel."""
+    table = history.to_table()
+    print("".join(f"{key:>14}" for key in table))
+    for row in zip(*table.values(), strict=True):
+        print("".join(f"{value:14.3f}" for value in row))
+
+
+def save_figure(history: LoadHistory) -> Path:
+    """Save the value vs time of each channel (and the s11-s12 path)."""
+    path_plot = history.load_case_name in PATH_PLOT
+    fig, axes = plt.subplots(
+        1, 2 if path_plot else 1, figsize=(11 if path_plot else 6, 4), squeeze=False
+    )
+    ax = axes[0, 0]
+    for channel in history.channels:
+        ax.plot(history.time, channel.values, marker=".", label=channel.name)
+    units = sorted({c.unit for c in history.channels})
+    ax.set(
+        xlabel=f"time [{TIME_UNIT}]",
+        ylabel=f"value [{', '.join(units)}]",
+        title=f"Case {history.load_case_name}: channels vs time",
+    )
+    ax.axhline(0.0, color="grey", linewidth=0.5)
+    ax.legend()
+    ax.grid(True)
+    if path_plot:
+        ax = axes[0, 1]
+        ax.plot(history.get("s11").values, history.get("s12").values)
+        ax.set(
+            xlabel="s11 [MPa]",
+            ylabel="s12 [MPa]",
+            title=f"Case {history.load_case_name}: s11-s12 path",
+            aspect="equal",
+        )
+        ax.grid(True)
+    fig.tight_layout()
+    path = OUTPUT / f"case_{history.load_case_name.replace(' ', '_')}.png"
+    fig.savefig(path, dpi=120)
+    plt.close(fig)
+    return path
+
+
+OUTPUT.mkdir(parents=True, exist_ok=True)
+for case in CASES:
+    history = case.history()
+    print(
+        f"Case {case.name:<26} {len(history):4d} samples, "
+        f"t_end = {history.time[-1]:g} s -> {save_figure(history).name}"
+    )
+print(f"Figures saved in {OUTPUT}")
+
+print("\nCase 4 (out-of-phase), N = 8 samples per period:")
+case4 = LoadCase("4 out-of-phase", [s11, s12_90], samples_per_period=8).history()
+print_table(case4)
+
+print("\nto_voigt_stress() of case 4, columns 11, 22, 33, 23, 13, 12 [MPa]:")
+print(np.round(case4.to_voigt_stress(), 3))
+
+strain_case = LoadCase(
+    "out-of-phase strain",
+    [
+        Channel("e11", Quantity.STRAIN, "e11", sine(1e-3)),
+        Channel("e12", Quantity.STRAIN, "e12", sine(0.65e-3, phase=90.0)),
+    ],
+    samples_per_period=8,
+)
+print("\nto_voigt_strain() of the same loading in strain [mm/mm]:")
+with np.printoptions(precision=6, suppress=True):
+    print(strain_case.history().to_voigt_strain())
