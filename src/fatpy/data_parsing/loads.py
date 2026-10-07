@@ -1,7 +1,7 @@
 """Load data parsing module.
 
 Definition of the loading conditions applied to a component, following the
-load definition of PragTic (J. Papuga).
+load definition of PragTic .
 
 Overview:
     - A `Channel` gives one component of one physical `Quantity` (stress,
@@ -143,7 +143,7 @@ def _read_only(values: ArrayLike) -> NDArray[np.float64]:
 
 @dataclass(frozen=True)
 class Channel:
-    """One loaded component and its time signal (a PragTic load channel).
+    """One loaded component and its time signal.
 
     Attributes:
         name: Channel name, not empty and unique within a load case.
