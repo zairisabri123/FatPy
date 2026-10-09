@@ -1,7 +1,8 @@
 """Test functions for the signal module.
 
-Covers the waveforms, the common period of periodic signals, the
-constant- and variable-amplitude signals and their error conditions.
+Covers the waveforms, the peak instants used for sampling, the constant-
+and variable-amplitude signals, the CSV reading of measured records and their
+error conditions.
 """
 
 import ast
@@ -14,11 +15,11 @@ import pytest
 from fatpy.utils import signal
 from fatpy.utils.signal import (
     ConstantAmplitudeSignal,
+    CsvFormatError,
     SignalError,
     VariableAmplitudeSignal,
     Waveform,
-    common_time_axis,
-    period_lcm,
+    read_numeric_csv,
     waveform_shape,
 )
 
@@ -68,51 +69,8 @@ def test_closed_cycle_for_every_waveform(waveform: Waveform) -> None:
         sig = ConstantAmplitudeSignal(mean=50.0, waveform=waveform)
     else:
         sig = ConstantAmplitudeSignal(100.0, 50.0, waveform, period=1.0)
-    values = sig.evaluate(common_time_axis([1.0], 64, 1000))
+    values = sig.evaluate(np.linspace(0.0, 1.0, 73))
     assert values[-1] == pytest.approx(values[0], rel=RTOL)
-
-
-# -- period_lcm / common_time_axis -----------------------------------------
-
-
-@pytest.mark.parametrize(
-    ("periods", "expected"),
-    [
-        ([1.0], 1.0),
-        ([0.2, 0.3], 0.6),
-        ([1.0, 0.5], 1.0),
-        ([1.5, 2.0], 6.0),
-        ([1 / 3, 0.5], 1.0),
-        ([0.1 + 0.2], 0.3),
-    ],
-)
-def test_period_lcm(periods: list[float], expected: float) -> None:
-    """The least common multiple is exact for decimal and rational periods."""
-    assert period_lcm(periods) == pytest.approx(expected, rel=RTOL)
-
-
-def test_common_time_axis_pragtic_example() -> None:
-    """Periods 1.5 s and 2 s, N = 4: 17 samples with dt = 0.375 s."""
-    time = common_time_axis([1.5, 2.0], samples_per_period=4, max_cycles=1000)
-    assert time.size == 17
-    np.testing.assert_allclose(np.diff(time), 0.375, rtol=RTOL)
-    assert time[0] == 0.0
-    assert time[-1] == pytest.approx(6.0, rel=RTOL)
-
-
-def test_common_time_axis_requires_four_samples() -> None:
-    """Change 4: samples_per_period below 4 is refused, 4 is accepted."""
-    with pytest.raises(SignalError, match=r"must be an integer >= 4, got 3"):
-        common_time_axis([1.0], samples_per_period=3, max_cycles=1000)
-    with pytest.raises(SignalError, match=r"must be an integer >= 4, got 4\.5"):
-        common_time_axis([1.0], samples_per_period=4.5, max_cycles=1000)  # type: ignore[arg-type]
-    assert common_time_axis([1.0], samples_per_period=4, max_cycles=1000).size == 5
-
-
-def test_common_time_axis_incommensurate_advice() -> None:
-    """Change 4: the error advises rounding the frequency ratio."""
-    with pytest.raises(SignalError, match=r"incommensurate.*1:1\.414 -> 5:7"):
-        common_time_axis([1.0, 1.4142], samples_per_period=64, max_cycles=1000)
 
 
 # -- ConstantAmplitudeSignal -------------------------------------------------
@@ -234,25 +192,6 @@ def test_variable_amplitude_is_sequence_without_time_scale() -> None:
 # -- error conditions ---------------------------------------------------------
 
 
-def test_period_lcm_empty_raises() -> None:
-    """No period at all."""
-    with pytest.raises(SignalError, match="At least one period"):
-        period_lcm([])
-
-
-@pytest.mark.parametrize("bad", [0.0, -1.0, float("nan"), float("inf")])
-def test_period_lcm_invalid_period_raises(bad: float) -> None:
-    """A zero, negative or non-finite period, named in the message."""
-    with pytest.raises(SignalError, match="finite and positive"):
-        period_lcm([1.0, bad])
-
-
-def test_period_lcm_below_precision_raises() -> None:
-    """A positive period shorter than TIME_PRECISION."""
-    with pytest.raises(SignalError, match="below TIME_PRECISION"):
-        period_lcm([1e-12])
-
-
 def test_constant_waveform_with_period_raises() -> None:
     """A CONSTANT waveform cannot have a period or a frequency."""
     with pytest.raises(SignalError, match="no period"):
@@ -355,6 +294,13 @@ def test_module_docstring() -> None:
     assert "Future work:" in doc
     assert "PSD" in doc
     assert "Signal` protocol" in doc
+    assert "from_csv" in doc
+
+
+def test_lcm_and_time_axis_moved_to_loads() -> None:
+    """The combination of several signals is not done in the signal module."""
+    for name in ("period_lcm", "common_time_axis", "MIN_SAMPLES_PER_PERIOD"):
+        assert not hasattr(signal, name)
 
 
 def test_signal_module_does_not_import_data_parsing() -> None:
@@ -367,3 +313,145 @@ def test_signal_module_does_not_import_data_parsing() -> None:
         elif isinstance(node, ast.ImportFrom) and node.module:
             imported.append(node.module)
     assert not [m for m in imported if "data_parsing" in m]
+
+
+# -- peak instants -------------------------------------------------------------
+
+
+@pytest.mark.parametrize("waveform", [Waveform.SINE, Waveform.TRIANGLE])
+@pytest.mark.parametrize("phase", [0.0, 7.0, 90.0, -33.3, 200.0, 360.0])
+def test_peak_instants_are_the_extremes(waveform: Waveform, phase: float) -> None:
+    """The signal reaches exactly mean +- amplitude at the peak instants."""
+    sig = ConstantAmplitudeSignal(100.0, 20.0, waveform, period=0.4, phase=phase)
+    peaks = sig.peak_instants(1.2)
+    assert np.all((peaks >= 0.0) & (peaks <= 1.2 + 1e-12))
+    values = sig.evaluate(peaks)
+    assert np.sum(np.isclose(values, 120.0, rtol=RTOL)) >= 3
+    assert np.sum(np.isclose(values, -80.0, rtol=RTOL)) >= 3
+    assert np.all(np.isclose(np.abs(values - 20.0), 100.0, rtol=RTOL))
+
+
+def test_peak_instants_include_both_ends() -> None:
+    """A peak at t = 0 is repeated at the end of a whole number of periods."""
+    sig = ConstantAmplitudeSignal(1.0, period=1.0, phase=90.0)
+    np.testing.assert_allclose(sig.peak_instants(2.0), [0.0, 0.5, 1.0, 1.5, 2.0])
+
+
+@pytest.mark.parametrize(
+    "sig",
+    [
+        ConstantAmplitudeSignal(1.0, waveform=Waveform.SQUARE, period=1.0),
+        ConstantAmplitudeSignal(mean=3.0, waveform=Waveform.CONSTANT),
+    ],
+)
+def test_peak_instants_empty_for_flat_waveforms(
+    sig: ConstantAmplitudeSignal,
+) -> None:
+    """Square and constant waveforms are hit by any sample."""
+    assert sig.peak_instants(5.0).size == 0
+
+
+# -- measured record from CSV --------------------------------------------------
+
+
+def write(path: Path, text: str) -> Path:
+    """Write `text` to `path` and return it."""
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+def test_from_csv_with_time_column(tmp_path: Path) -> None:
+    """Values and time instants come from the named columns."""
+    text = "t,F,other\n0.0,0,9\n0.1,5000,9\n0.3,-2000,9\n"
+    path = write(tmp_path / "rec.csv", text)
+    sig = VariableAmplitudeSignal.from_csv(path, "F", time_column="t")
+    np.testing.assert_array_equal(sig.values, [0.0, 5000.0, -2000.0])
+    np.testing.assert_allclose(sig.instants, [0.0, 0.1, 0.3])
+
+
+def test_from_csv_without_time_column(tmp_path: Path) -> None:
+    """Without time column: row order and time_step, or a load sequence."""
+    path = write(tmp_path / "rec.csv", "﻿ F \n1.0\n\n2.0\n3.0\n")
+    timed = VariableAmplitudeSignal.from_csv(path, "F", time_step=0.5)
+    np.testing.assert_allclose(timed.instants, [0.0, 0.5, 1.0])
+    sequence = VariableAmplitudeSignal.from_csv(path, "F")
+    assert sequence.is_sequence
+    np.testing.assert_array_equal(sequence.values, [1.0, 2.0, 3.0])
+
+
+def test_from_csv_missing_column_raises(tmp_path: Path) -> None:
+    """The error names the file and the available columns."""
+    path = write(tmp_path / "rec.csv", "t,F\n0,1\n1,2\n")
+    with pytest.raises(CsvFormatError, match=r"rec\.csv: no column 'G'.*\['t', 'F'\]"):
+        VariableAmplitudeSignal.from_csv(path, "G")
+
+
+def test_from_csv_time_column_and_step_raises(tmp_path: Path) -> None:
+    """time_column and time_step are exclusive."""
+    path = write(tmp_path / "rec.csv", "t,F\n0,1\n1,2\n")
+    with pytest.raises(SignalError, match="not both"):
+        VariableAmplitudeSignal.from_csv(path, "F", time_column="t", time_step=1.0)
+
+
+def test_from_csv_nan_raises_with_line_and_column(tmp_path: Path) -> None:
+    """A NaN in a used column names the line and the column."""
+    path = write(tmp_path / "rec.csv", "t,F\n0,1\n1,nan\n")
+    with pytest.raises(CsvFormatError, match=r"rec\.csv, line 3, column 'F'.*nan"):
+        VariableAmplitudeSignal.from_csv(path, "F", time_column="t")
+
+
+def test_from_csv_invalid_signal_names_file(tmp_path: Path) -> None:
+    """A non-increasing time column is a SignalError naming the file."""
+    path = write(tmp_path / "rec.csv", "t,F\n0,1\n0,2\n")
+    with pytest.raises(SignalError, match=r"rec\.csv: time must be strictly"):
+        VariableAmplitudeSignal.from_csv(path, "F", time_column="t")
+
+
+def test_read_numeric_csv_lines_and_filter(tmp_path: Path) -> None:
+    """Line numbers count the header and blank lines; keep filters rows."""
+    path = write(tmp_path / "t.csv", "a,b\n1,2\n\n3,4\n5,6\n")
+    table = read_numeric_csv(path)
+    assert table.header == ("a", "b")
+    np.testing.assert_array_equal(table.lines, [2, 4, 5])
+    assert table.data.dtype == np.float64
+    with pytest.raises(ValueError, match="read-only"):
+        table.data[0, 0] = 0.0
+    kept = read_numeric_csv(path, keep=lambda text: not text.startswith("3"))
+    np.testing.assert_array_equal(kept.data, [[1.0, 2.0], [5.0, 6.0]])
+    empty = read_numeric_csv(write(tmp_path / "e.csv", "a,b\n"))
+    assert empty.data.shape == (0, 2)
+
+
+def test_read_numeric_csv_in_chunks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Chunked reading gives the same table as a single read."""
+    rows = "".join(f"{i},{2 * i}\n" for i in range(10))
+    path = write(tmp_path / "t.csv", "a,b\n" + rows)
+    monkeypatch.setattr(signal, "_CSV_CHUNK_LINES", 3)
+    table = read_numeric_csv(path)
+    np.testing.assert_array_equal(table.data[:, 1], 2.0 * np.arange(10))
+    np.testing.assert_array_equal(table.lines, np.arange(2, 12))
+
+
+@pytest.mark.parametrize(
+    ("text", "message"),
+    [
+        ("a,b\n1,2\n3,x\n", r"line 3, column 'b': non-numeric value 'x'"),
+        ("a,b\n1,2\n,4\n", r"line 3, column 'a': non-numeric value ''"),
+        ("a,b\n1,2\n3,4,5\n", r"line 3: 3 values for the 2 columns"),
+        ("a,b\n1\n", r"line 2: 1 values for the 2 columns"),
+        ("", r"line 1: expected a header"),
+        ("a,,b\n1,2,3\n", r"line 1: expected a header"),
+    ],
+)
+def test_read_numeric_csv_errors(tmp_path: Path, text: str, message: str) -> None:
+    """Format errors name the file, the line and the column."""
+    path = write(tmp_path / "bad.csv", text)
+    with pytest.raises(CsvFormatError, match=r"bad\.csv, " + message):
+        read_numeric_csv(path)
+
+
+def test_csv_format_error_is_value_error() -> None:
+    """CsvFormatError can be caught as a ValueError."""
+    assert issubclass(CsvFormatError, ValueError)
