@@ -5,26 +5,6 @@ acting on a specified material plane, typically used in multiaxial fatigue analy
 projecting the stress tensor onto the plane of interest, they provide key parameters
 for assessing crack initiation risks and fatigue life under complex loading paths.
 
-Input and output conventions:
-    - A path is an array of shape **exactly** (n_steps, 2): the two in-plane
-      coordinates of one point per time step, e.g. the shear stress vector
-      $(\tau_l, \tau_r)$ on one plane given by
-      `fatpy.struct_mech.transformations.tensor_projection_on_plane`. This
-      module does not import it: the projection and the circle are chained
-      by the caller, so the geometric solvers stay free of any
-      stress-specific code and can be reused for other point sets.
-    - The solvers are **reductions** over the time axis: they return the
-      centre, shape (2,), and the radius, a float, of a circle enclosing all
-      the points. Any other input shape, including 3D arrays, raises
-      ValueError. In an array of shape (1000, 200, 2) nothing tells the node
-      axis from the time axis, and reducing over the wrong one would return
-      the circle of many nodes at one instant instead of one node over time,
-      with plausible values and no error.
-    - A future multi-plane wrapper (not implemented here) should take paths
-      of shape (n_planes, n_steps, 2) and return centres of shape
-      (n_planes, 2) and radii of shape (n_planes,), looping over the planes.
-    - Coordinates and radius are in the unit of the input (e.g. MPa).
-
 Minimum circumscribed circle:
     The smallest circle enclosing a finite point set is unique and is
     supported either by **two** points forming a diameter or by **three**
